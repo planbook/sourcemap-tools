@@ -1,7 +1,7 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 import cx from 'clsx'
-import { type ChangeEvent, useState } from 'react'
+import { type ChangeEvent, useEffect, useState } from 'react'
 
-import { GitHubLogo } from './GitHubLogo.tsx'
 import { transform } from './lib.ts'
 import { SourceMap } from './SourceMap.ts'
 import { StackTrace } from './StackTrace.ts'
@@ -59,6 +59,99 @@ function App() {
     setIsSourceMapInputError(false)
   }
 
+  
+  // ==== NEW: helpers for fetching sourcemaps from same-domain /sourcemaps ====
+  function basenameFromUrlLike(input: string): null | string  {
+    try {
+      const u = new URL(input)
+      const last = u.pathname.split('/').filter(Boolean).pop() ?? ''
+      return last.replace(/(\.map)?(\?.*)?(#.*)?$/i, '')
+    } catch {
+      const pathLike = input.split(/[?#]/)[0]
+      const last = pathLike.split('/').filter(Boolean).pop()
+      return last ?? null
+    }
+  }
+
+  async function tryFetchSameDomainSourceMap(fileUrlLike: string) {
+    const origin = window.location.origin;
+    const baseName = basenameFromUrlLike(fileUrlLike)
+    if (!origin || !baseName) return null
+
+    // environments to check in order
+    const envs = ['', 'prod/', 'staging/', 'test/']
+    const subdirs = ['', 'js/', 'css/']
+    const exts = ['.map', '.txt']
+
+    const candidates: string[] = []
+    for (const env of envs) {
+      for (const dir of subdirs) {
+        for (const ext of exts) {
+          candidates.push(
+            `${origin}/sourcemaps/${env}${dir}${baseName}${ext}`
+          )
+        }
+      }
+    }
+
+    for (const url of candidates) {
+      try {
+        const res = await fetch(url, { credentials: 'include' })
+        if (!res.ok) continue
+        const text = await res.text()
+        const sm = await SourceMap.create(text, `${baseName}.map`)
+        if (sm) return sm
+      } catch {
+        // ignore and keep trying
+      }
+    }
+    return null
+  }
+
+  const [fetching, setFetching] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    async function go() {
+      if (!stackTrace?.fileNames?.length || fetching) return
+      setFetching(true)
+
+      const existingNames = new Set(
+        sourceMaps
+          .map((m: { fileName?: string; fileNameInline?: string }) => m.fileName ?? m.fileNameInline ?? '')
+          .filter(Boolean)
+      )
+
+      
+      const results: any[] = []
+      for (const name of stackTrace.fileNames) {
+        if (cancelled) break
+        const baseName = basenameFromUrlLike(name)
+        if (baseName && [...existingNames].some(n => n.includes(baseName))) {
+          continue
+        }
+        const sm = await tryFetchSameDomainSourceMap(name)
+        if (sm) {
+          results.push(sm)
+          if ((sm as any).fileName) existingNames.add((sm as any).fileName)
+        }
+      }
+
+      if (!cancelled && results.length) {
+        addSourceMaps(results as any)
+      }
+      if (!cancelled) setFetching(false)
+    }
+
+    const t = setTimeout(go, 150)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+      setFetching(false)
+    }
+  }, [stackTrace?.fileNames?.join('|'), sourceMaps.length])
+  // ==== END NEW ====
+
   return (
     <main
       className={cx('min-h-screen flex flex-col', theme === 'dark' && 'dark')}
@@ -68,20 +161,12 @@ function App() {
         <nav className="navbar px-0">
           <div className="navbar-start">
             <a className="normal-case text-xl" href="/">
-              sourcemap.tools
+              <img alt="Planbook Sourcemap" height="50px" src="https://cdn.planbook.com/images/planbook-logo-blue.svg" />
             </a>
           </div>
 
           <div className="navbar-end">
             <div className="flex items-center gap-x-2">
-              <a
-                className="btn btn-sm btn-neutral"
-                href="https://github.com/rmuratov/sourcemap.tools"
-              >
-                Star
-                <GitHubLogo />
-              </a>
-
               <ThemeToggle onChange={setTheme} theme={theme} />
             </div>
           </div>
@@ -147,7 +232,7 @@ function App() {
           <div className="card card-bordered card-compact rounded-lg border-neutral-content dark:border-opacity-20">
             <div className="card-body">
               <h2 className="card-title">Source maps</h2>
-
+              <h4> {fetching ? 'Looking for sourcemaps…' : ''}</h4>
               <div className="grid grid-cols-1 lg:grid-cols-6 gap-2">
                 <div className="form-control lg:col-span-2">
                   <label
@@ -238,11 +323,6 @@ function App() {
       </div>
 
       <footer className="footer bg-base-200 py-4 mt-8">
-        <nav className="px-4 2xl:container 2xl:mx-auto">
-          <a className="link link-hover" href="https://github.com/rmuratov/sourcemap.tools">
-            GitHub
-          </a>
-        </nav>
       </footer>
     </main>
   )
